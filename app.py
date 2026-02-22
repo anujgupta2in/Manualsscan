@@ -9,10 +9,17 @@ import os
 import io
 import time
 import logging
-import tkinter as tk
-from tkinter import filedialog
 from pathlib import Path
 from pypdf import PdfReader
+
+# Optional Tkinter for local folder browsing
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+    HAS_TKINTER = True
+except ImportError:
+    HAS_TKINTER = False
+
 try:
     from docx import Document
 except ImportError:
@@ -39,12 +46,17 @@ if "stop_requested" not in st.session_state:
 
 # --- UI Helper ---
 def select_folder():
-    root = tk.Tk()
-    root.withdraw()
-    root.wm_attributes('-topmost', 1)
-    folder_path = filedialog.askdirectory(master=root)
-    root.destroy()
-    return folder_path
+    if not HAS_TKINTER:
+        return None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes('-topmost', 1)
+        folder_path = filedialog.askdirectory(master=root)
+        root.destroy()
+        return folder_path
+    except Exception:
+        return None
 
 # --- Extraction Logic ---
 def extract_pdf_content(file_path):
@@ -78,12 +90,15 @@ with st.sidebar:
     st.header("Scan Settings")
     input_folder = st.text_input("Folder Path", value=st.session_state.get("last_folder", ""))
     
-    if st.button("Browse Folder (Windows)"):
-        selected = select_folder()
-        if selected:
-            input_folder = selected
-            st.session_state.last_folder = selected
-            st.rerun()
+    if HAS_TKINTER:
+        if st.button("Browse Folder (Windows)"):
+            selected = select_folder()
+            if selected:
+                input_folder = selected
+                st.session_state.last_folder = selected
+                st.rerun()
+    else:
+        st.info("💡 Folder browsing is disabled in cloud environments. Please paste the full path manually.")
 
     include_subfolders = st.checkbox("Include subfolders", value=True)
     scan_docx = st.checkbox("Scan DOCX", value=True)
