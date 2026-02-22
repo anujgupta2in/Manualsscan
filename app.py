@@ -88,19 +88,41 @@ st.markdown("Scan folders for ship manuals, drawings, and certificates. Extracts
 
 with st.sidebar:
     st.header("Scan Settings")
-    input_folder = st.text_input("Folder Path", value=st.session_state.get("last_folder", ""))
     
-    if HAS_TKINTER:
-        if st.button("Browse Folder (Windows)"):
-            selected = select_folder()
-            if selected:
-                input_folder = selected
-                st.session_state.last_folder = selected
-                st.rerun()
-    else:
-        st.info("💡 Folder browsing is disabled in cloud environments. Please paste the full path manually.")
+    # --- Mode Selection ---
+    scan_mode = st.radio("Scan Mode", ["Folder Path", "Upload Files"], 
+                         index=0 if HAS_TKINTER else 1,
+                         help="Folder Path works best locally. Upload Files is required for Cloud deployment.")
+    
+    files_to_scan = []
+    input_folder = ""
 
-    include_subfolders = st.checkbox("Include subfolders", value=True)
+    if scan_mode == "Folder Path":
+        input_folder = st.text_input("Folder Path", value=st.session_state.get("last_folder", ""))
+        
+        if HAS_TKINTER:
+            if st.button("Browse Folder (Windows)"):
+                selected = select_folder()
+                if selected:
+                    input_folder = selected
+                    st.session_state.last_folder = selected
+                    st.rerun()
+        else:
+            st.info("💡 Folder browsing is disabled in cloud environments. Please paste the full path manually or use 'Upload Files' mode.")
+
+        include_subfolders = st.checkbox("Include subfolders", value=True)
+        
+        if input_folder and os.path.exists(input_folder):
+            target_path = Path(input_folder)
+            if include_subfolders:
+                all_files = list(target_path.rglob("*"))
+            else:
+                all_files = list(target_path.glob("*"))
+            files_to_scan = [f for f in all_files if f.is_file()]
+    else:
+        uploaded_files = st.file_uploader("Upload Manuals/Drawings", type=["pdf", "docx"], accept_multiple_files=True)
+        files_to_scan = uploaded_files if uploaded_files else []
+
     scan_docx = st.checkbox("Scan DOCX", value=True)
     enable_debug = st.checkbox("Enable debug logs", value=False)
     
@@ -115,113 +137,109 @@ if stop_btn:
     st.warning("Stop requested. Finishing current file...")
 
 if start_btn:
-    if not input_folder or not os.path.exists(input_folder):
-        st.error("Please provide a valid folder path.")
+    if not files_to_scan:
+        st.error("Please provide a folder path or upload files first.")
     else:
         st.session_state.scanning = True
         st.session_state.stop_requested = False
         st.session_state.results = []
         
-        target_path = Path(input_folder)
-        if include_subfolders:
-            all_files = list(target_path.rglob("*"))
-        else:
-            all_files = list(target_path.glob("*"))
-            
-        files_to_scan = [f for f in all_files if f.is_file()]
         total_files = len(files_to_scan)
         
-        if total_files == 0:
-            st.warning("No files found in the selected folder.")
-            st.session_state.scanning = False
-        else:
-            # LIVE COUNTERS
-            stats_cols = st.columns(6)
-            total_c = stats_cols[0].metric("Total", total_files)
-            processed_c = stats_cols[1].empty()
-            success_c = stats_cols[2].empty()
-            skipped_u = stats_cols[3].empty()
-            skipped_ocr = stats_cols[4].empty()
-            errors_c = stats_cols[5].empty()
+        # LIVE COUNTERS
+        stats_cols = st.columns(6)
+        total_c = stats_cols[0].metric("Total", total_files)
+        processed_c = stats_cols[1].empty()
+        success_c = stats_cols[2].empty()
+        skipped_u = stats_cols[3].empty()
+        skipped_ocr = stats_cols[4].empty()
+        errors_c = stats_cols[5].empty()
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        counts = {"processed": 0, "success": 0, "unsupported": 0, "ocr_missing": 0, "error": 0}
+        type_counts = {}
+
+        for idx, file_item in enumerate(files_to_scan):
+            if st.session_state.stop_requested:
+                st.info("Scan stopped by user.")
+                break
             
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            counts["processed"] += 1
             
-            counts = {"processed": 0, "success": 0, "unsupported": 0, "ocr_missing": 0, "error": 0}
-            type_counts = {}
+            # Handle both Path objects (local) and UploadedFile objects (cloud)
+            fname = file_item.name
+            fext = Path(fname).suffix.lower()
+            fparent = str(file_item.parent) if hasattr(file_item, "parent") else ""
+            rel_path = os.path.relpath(file_item, input_folder) if input_folder else fname
+            
+            status_text.text(f"Processing ({counts['processed']}/{total_files}): {fname}")
+            progress_bar.progress(counts["processed"] / total_files)
+            
+            content = ""
+            status = "Unknown"
+            metadata = {}
+            
+            # Use file_item itself as it can be a Path or a File-like object
+            if fext == ".pdf":
+                content, metadata, status = extract_pdf_content(file_item)
+            elif fext == ".docx" and scan_docx:
+                content, status = extract_docx_content(file_item)
+            elif fext == ".doc":
+                content, status = "", "Skipped: .doc requires LibreOffice"
+            else:
+                content, status = "", "Skipped: Unsupported format"
 
-            for idx, file_path in enumerate(files_to_scan):
-                if st.session_state.stop_requested:
-                    st.info("Scan stopped by user.")
-                    break
-                
-                counts["processed"] += 1
-                status_text.text(f"Processing ({counts['processed']}/{total_files}): {file_path.name}")
-                progress_bar.progress(counts["processed"] / total_files)
-                
-                ext = file_path.suffix.lower()
-                content = ""
-                status = "Unknown"
-                metadata = {}
-                
-                if ext == ".pdf":
-                    content, metadata, status = extract_pdf_content(file_path)
-                elif ext == ".docx" and scan_docx:
-                    content, status = extract_docx_content(file_path)
-                elif ext == ".doc":
-                    content, status = "", "Skipped: .doc requires LibreOffice"
-                else:
-                    content, status = "", "Skipped: Unsupported format"
+            # Post-processing
+            if status == "Success" and not content.strip():
+                status = "Skipped: Scanned/No Text (OCR missing)"
+                counts["ocr_missing"] += 1
+            elif "Skipped" in status:
+                counts["unsupported"] += 1
+            elif "Error" in status:
+                counts["error"] += 1
+            else:
+                counts["success"] += 1
 
-                # Post-processing
-                if status == "Success" and not content.strip():
-                    status = "Skipped: Scanned/No Text (OCR missing)"
-                    counts["ocr_missing"] += 1
-                elif "Skipped" in status:
-                    counts["unsupported"] += 1
-                elif "Error" in status:
-                    counts["error"] += 1
-                else:
-                    counts["success"] += 1
+            manual_name = identify_manual_name(content, fname, fparent, metadata)
+            doc_type = classify_doc_type(content, fname, fparent)
+            type_counts[doc_type] = type_counts.get(doc_type, 0) + 1
+            
+            # Confidence Logic
+            confidence = "Low"
+            clues = []
+            if content.strip():
+                confidence = "Med"
+                clues.append("Text content")
+            if metadata and metadata.get('/Title'):
+                meta_title = str(metadata['/Title']).strip().upper()
+                if meta_title and meta_title in manual_name.upper():
+                    confidence = "High"
+                    clues.append("Metadata match")
+            if "manual" in fname.lower() or (fparent and "manual" in fparent.lower()):
+                clues.append("Keyword clue")
 
-                manual_name = identify_manual_name(content, file_path.name, str(file_path.parent), metadata)
-                doc_type = classify_doc_type(content, file_path.name, str(file_path.parent))
-                type_counts[doc_type] = type_counts.get(doc_type, 0) + 1
-                
-                # Confidence Logic
-                confidence = "Low"
-                clues = []
-                if content.strip():
-                    confidence = "Med"
-                    clues.append("Text content")
-                if metadata and metadata.get('/Title'):
-                    meta_title = str(metadata['/Title']).strip().upper()
-                    if meta_title and meta_title in manual_name.upper():
-                        confidence = "High"
-                        clues.append("Metadata match")
-                if "manual" in file_path.name.lower() or "manual" in str(file_path.parent).lower():
-                    clues.append("Keyword clue")
-
-                res = {
-                    "File Name": file_path.name,
-                    "Relative Path": os.path.relpath(file_path, input_folder),
-                    "File Type": doc_type,
-                    "Extracted Manual/Equipment/System Name": manual_name,
-                    "Confidence": confidence,
-                    "Clues": ", ".join(clues),
-                    "Notes": status
-                }
-                st.session_state.results.append(res)
-                
-                # Update UI Counters
-                processed_c.metric("Processed", counts["processed"])
-                success_c.metric("Success", counts["success"])
-                skipped_u.metric("Unsupported", counts["unsupported"])
-                skipped_ocr.metric("No Text", counts["ocr_missing"])
-                errors_c.metric("Errors", counts["error"])
-                
-                if enable_debug:
-                    st.write(f"DEBUG: Scanned {file_path.name} -> {manual_name} ({doc_type})")
+            res = {
+                "File Name": fname,
+                "Relative Path": rel_path,
+                "File Type": doc_type,
+                "Extracted Manual/Equipment/System Name": manual_name,
+                "Confidence": confidence,
+                "Clues": ", ".join(clues),
+                "Notes": status
+            }
+            st.session_state.results.append(res)
+            
+            # Update UI Counters
+            processed_c.metric("Processed", counts["processed"])
+            success_c.metric("Success", counts["success"])
+            skipped_u.metric("Unsupported", counts["unsupported"])
+            skipped_ocr.metric("No Text", counts["ocr_missing"])
+            errors_c.metric("Errors", counts["error"])
+            
+            if enable_debug:
+                st.write(f"DEBUG: Scanned {fname} -> {manual_name} ({doc_type})")
 
             st.session_state.scanning = False
             st.success("Scan complete!")
